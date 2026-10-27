@@ -111,8 +111,10 @@ Below is an overview of the key features and functionality offered by Win11Deblo
 - Remove known preinstalled apps that have never been opened, including third-party apps that came with the PC rather than apps you installed yourself.
 - Put moved files back with `-UndoLaptopCleanup`.
 
+`.gemini` folders are left in place. They hold Gemini settings and sign-in files, not documents.
+
 ```PowerShell
-.\Win11Debloat.ps1 -LaptopCleanup -StorageHome "D:\LaptopArchive"
+.\Win11Debloat.ps1 -LaptopCleanup -CleanupRoot "C:\Users\Chelsea\Desktop\Documents" -StorageHome "D:\LaptopArchive"
 .\Win11Debloat.ps1 -UndoLaptopCleanup
 ```
 

@@ -105,6 +105,7 @@ param (
     [switch]$ApplyLaptopCleanup,
     [switch]$UndoLaptopCleanup,
     [string]$StorageHome,
+    [string]$CleanupRoot,
     [ValidateRange(30, 3650)]
     [int]$StaleDays = 365,
     [ValidateRange(10, 102400)]
@@ -175,7 +176,7 @@ $script:ImportExportConfigSchema = Join-Path $schemasPath 'ImportExportConfigWin
 $script:RestoreBackupWindowSchema = Join-Path $schemasPath 'RestoreBackupWindow.xaml'
 $script:LoadAppsDetailsScriptPath = Join-Path (Join-Path $scriptsPath 'FileIO') 'LoadAppsDetailsFromJson.ps1'
 
-$script:ControlParams = 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'LogPath', 'Silent', 'Sysprep', 'User', 'NoRestartExplorer', 'RunDefaults', 'RunDefaultsLite', 'RunSavedSettings', 'Config', 'RunAppsListGenerator', 'CLI', 'AppRemovalTarget', 'StorageHome', 'StaleDays', 'LargeFileMB', 'ApplyLaptopCleanup'
+$script:ControlParams = 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'LogPath', 'Silent', 'Sysprep', 'User', 'NoRestartExplorer', 'RunDefaults', 'RunDefaultsLite', 'RunSavedSettings', 'Config', 'RunAppsListGenerator', 'CLI', 'AppRemovalTarget', 'StorageHome', 'CleanupRoot', 'StaleDays', 'LargeFileMB', 'ApplyLaptopCleanup'
 
 # Script-level variables for GUI elements
 $script:GuiWindow = $null

@@ -120,8 +120,67 @@ function Get-CleanupSkipDirectoryNames {
     return @(
         'node_modules', '.git', '.svn', '.hg', 'AppData', 'Application Data',
         'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-        '$Recycle.Bin', 'System Volume Information', 'Win11Debloat'
+        '$Recycle.Bin', 'System Volume Information', 'Win11Debloat',
+        '.gemini'
     )
+}
+
+function Test-CleanupPathIsGemini {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    $current = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $leaf = Split-Path -Leaf $current
+        if ($leaf.Equals('.gemini', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent.TrimEnd('\', '/').Equals($current, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $current = $parent.TrimEnd('\', '/')
+    }
+
+    return $false
+}
+
+# .gemini holds Gemini settings and sign-in files. A path that points at it
+# is turned into the Documents folder above it so those files stay put.
+function Resolve-LaptopCleanupRoot {
+    param(
+        [string]$Requested
+    )
+
+    $resolved = [pscustomobject]@{
+        Path = $null
+        Warning = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($Requested)) {
+        return $resolved
+    }
+
+    $full = [System.IO.Path]::GetFullPath($Requested)
+    if (-not (Test-CleanupPathIsGemini -Path $full)) {
+        $resolved.Path = $full
+        return $resolved
+    }
+
+    $current = $full.TrimEnd('\', '/')
+    while (-not (Split-Path -Leaf $current).Equals('.gemini', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $current = (Split-Path -Parent $current).TrimEnd('\', '/')
+    }
+
+    $parent = Split-Path -Parent $current
+    $resolved.Path = $parent
+    $resolved.Warning = ".gemini holds Gemini app data, including sign-in files, so it was left in place. Documents in '$parent' will be cleaned instead."
+    return $resolved
 }
 
 function Test-CleanupSkipDirectory {
@@ -1320,7 +1379,37 @@ function Resolve-LaptopStorageHome {
     return $null
 }
 
+function Add-UniqueCleanupPath {
+    param(
+        $List,
+        [string]$Folder,
+        [bool]$MustExist = $false
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Folder)) {
+        return
+    }
+    if ($MustExist -and -not (Test-Path -LiteralPath $Folder -PathType Container)) {
+        return
+    }
+    if (Test-CleanupPathIsGemini -Path $Folder) {
+        return
+    }
+
+    $full = [System.IO.Path]::GetFullPath($Folder).TrimEnd('\', '/')
+    foreach ($existing in $List) {
+        if ($existing.Equals($full, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+    $List.Add($full)
+}
+
 function Get-LaptopCleanupFolders {
+    param(
+        [string]$CleanupRoot
+    )
+
     $profilePath = $env:USERPROFILE
     $targetOtherUser = $false
     if ($script:Params -and $script:Params.ContainsKey('User') -and -not [string]::IsNullOrWhiteSpace([string]$script:Params['User'])) {
@@ -1358,39 +1447,55 @@ function Get-LaptopCleanupFolders {
         $music = Join-Path $profilePath 'Music'
     }
 
+    $desktopDocuments = $null
+    if (-not [string]::IsNullOrWhiteSpace($desktop)) {
+        $desktopDocuments = Join-Path $desktop 'Documents'
+    }
+
+    # An explicit folder wins. Otherwise a Documents folder that lives on the
+    # Desktop is the library when the normal Documents folder is missing.
+    $organizeParent = $documents
+    if (-not [string]::IsNullOrWhiteSpace($CleanupRoot)) {
+        $organizeParent = $CleanupRoot
+    }
+    elseif ([string]::IsNullOrWhiteSpace($documents) -and -not [string]::IsNullOrWhiteSpace($desktopDocuments)) {
+        $organizeParent = $desktopDocuments
+    }
+
     $scan = New-Object System.Collections.Generic.List[string]
-    foreach ($folder in @($desktop, $documents, $downloads, $pictures, $videos, $music)) {
-        if ([string]::IsNullOrWhiteSpace($folder)) {
+    foreach ($folder in @($desktop, $documents, $downloads, $pictures, $videos, $music, $CleanupRoot, $desktopDocuments)) {
+        if ([string]::IsNullOrWhiteSpace($folder) -or -not (Test-Path -LiteralPath $folder -PathType Container)) {
             continue
         }
-        if (Test-Path -LiteralPath $folder -PathType Container) {
-            $full = [System.IO.Path]::GetFullPath($folder)
-            if (-not $scan.Contains($full)) {
-                $scan.Add($full)
+        # Desktop\Documents is already covered by the Desktop walk. Scanning it
+        # again would plan the same file twice.
+        $alreadyCovered = $false
+        $fullFolder = [System.IO.Path]::GetFullPath($folder)
+        foreach ($existing in $scan) {
+            if ((Test-CleanupPathUnder -Path $fullFolder -Root $existing) -and -not (Test-CleanupPathEquals -Left $fullFolder -Right $existing)) {
+                $alreadyCovered = $true
+                break
             }
         }
+        if ($alreadyCovered) {
+            continue
+        }
+        Add-UniqueCleanupPath -List $scan -Folder $folder -MustExist $true
     }
 
     $loose = New-Object System.Collections.Generic.List[string]
-    foreach ($folder in @($desktop, $documents, $downloads)) {
-        if ([string]::IsNullOrWhiteSpace($folder)) {
-            continue
-        }
-        if (Test-Path -LiteralPath $folder -PathType Container) {
-            $loose.Add([System.IO.Path]::GetFullPath($folder))
-        }
+    foreach ($folder in @($desktop, $documents, $desktopDocuments, $downloads, $CleanupRoot)) {
+        Add-UniqueCleanupPath -List $loose -Folder $folder -MustExist $true
     }
 
     $library = New-Object System.Collections.Generic.List[string]
-    foreach ($folder in @($documents, $pictures, $videos)) {
-        if (-not [string]::IsNullOrWhiteSpace($folder)) {
-            $library.Add([System.IO.Path]::GetFullPath($folder))
-        }
+    foreach ($folder in @($documents, $desktopDocuments, $pictures, $videos, $CleanupRoot)) {
+        Add-UniqueCleanupPath -List $library -Folder $folder -MustExist $false
     }
 
     $organized = $null
-    if (-not [string]::IsNullOrWhiteSpace($documents)) {
-        $organized = Join-Path ([System.IO.Path]::GetFullPath($documents)) 'Organized'
+    if (-not [string]::IsNullOrWhiteSpace($organizeParent) -and -not (Test-CleanupPathIsGemini -Path $organizeParent)) {
+        $organized = Join-Path ([System.IO.Path]::GetFullPath($organizeParent)) 'Organized'
     }
 
     return [pscustomobject]@{
@@ -1670,7 +1775,19 @@ function Invoke-LaptopCleanup {
         return
     }
 
-    $folders = Get-LaptopCleanupFolders
+    $cleanupRoot = $null
+    $cleanupWarning = $null
+    if ($script:Params -and $script:Params.ContainsKey('CleanupRoot') -and -not [string]::IsNullOrWhiteSpace([string]$script:Params['CleanupRoot'])) {
+        $resolvedRoot = Resolve-LaptopCleanupRoot -Requested ([string]$script:Params['CleanupRoot'])
+        $cleanupRoot = $resolvedRoot.Path
+        $cleanupWarning = $resolvedRoot.Warning
+        if ($cleanupRoot -and -not (Test-Path -LiteralPath $cleanupRoot -PathType Container)) {
+            $cleanupWarning = "Cleanup folder '$cleanupRoot' was not found."
+            $cleanupRoot = $null
+        }
+    }
+
+    $folders = Get-LaptopCleanupFolders -CleanupRoot $cleanupRoot
     if (@($folders.ScanRoots).Count -eq 0) {
         Write-Host "No personal folders were found to clean." -ForegroundColor Yellow
         Write-Host ""
@@ -1692,7 +1809,14 @@ function Invoke-LaptopCleanup {
     }
     $storageHome = Resolve-LaptopStorageHome -Requested $requestedHome
     $warnings = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($cleanupWarning)) {
+        $warnings.Add($cleanupWarning)
+    }
 
+    if ($storageHome -and (Test-CleanupPathIsGemini -Path $storageHome)) {
+        $warnings.Add('.gemini holds Gemini app data, including sign-in files, so it was not used as the archive.')
+        $storageHome = $null
+    }
     if ($storageHome -and -not (Test-LaptopStorageHomeSafe -StorageHome $storageHome -ScanRoots $folders.ScanRoots)) {
         $warnings.Add("Archive location '$storageHome' contains a folder that would be cleaned, so it was not used.")
         $storageHome = $null

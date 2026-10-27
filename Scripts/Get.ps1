@@ -105,6 +105,7 @@ param (
     [switch]$ApplyLaptopCleanup,
     [switch]$UndoLaptopCleanup,
     [string]$StorageHome,
+    [string]$CleanupRoot,
     [ValidateRange(30, 3650)]
     [int]$StaleDays = 365,
     [ValidateRange(10, 102400)]

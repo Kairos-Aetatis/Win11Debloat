@@ -300,6 +300,47 @@ try {
     Assert-True ($summary -match 'Sort 3 document') 'Summary counts organized documents'
     Assert-True ($summary -match 'not deleted') 'Summary tells the user files are not deleted'
     Assert-True ($summary -match 'Clipchamp') 'Summary names apps that would be removed'
+
+    $chelseaDocs = Join-Path (Join-Path $temp 'DesktopDocuments') 'Documents'
+    $gemini = Join-Path $chelseaDocs '.gemini'
+    New-Item -ItemType Directory -Path $gemini -Force | Out-Null
+    $chelseaNote = Join-Path $chelseaDocs 'lesson.pdf'
+    [System.IO.File]::WriteAllText($chelseaNote, "A document that lives in Desktop\Documents.")
+    [System.IO.File]::WriteAllText((Join-Path $gemini 'settings.json'), '{"theme":"dark"}')
+    [System.IO.File]::WriteAllBytes((Join-Path $gemini 'token.bin'), (New-Object byte[] 300))
+    $geminiOld = Join-Path $gemini 'history.txt'
+    [System.IO.File]::WriteAllText($geminiOld, "Gemini history that must stay here.")
+    Set-OldTimestamp -Path $geminiOld -DaysAgo 900
+
+    $geminiPath = Join-Path $chelseaDocs '.gemini'
+    $resolved = Resolve-LaptopCleanupRoot -Requested $geminiPath
+    Assert-Equal $resolved.Path ([System.IO.Path]::GetFullPath($chelseaDocs)) 'A .gemini path cleans the Documents folder above it'
+    Assert-True ($resolved.Warning -match 'left in place') 'The warning says .gemini stays put'
+    Assert-True (Test-CleanupPathIsGemini -Path (Join-Path $gemini 'settings.json')) 'Files inside .gemini are recognized'
+    Assert-True (-not (Test-CleanupPathIsGemini -Path $chelseaDocs)) 'The Documents folder itself is not Gemini data'
+
+    $geminiArchive = Join-Path $temp 'GeminiArchive'
+    New-Item -ItemType Directory -Path $geminiArchive | Out-Null
+    $chelseaPlan = Get-LaptopCleanupPlan `
+        -ScanRoots @($chelseaDocs) `
+        -LooseDocRoots @($chelseaDocs) `
+        -LibraryRoots @($chelseaDocs) `
+        -OrganizedRoot (Join-Path $chelseaDocs 'Organized') `
+        -StorageHome $geminiArchive `
+        -ExcludeRoots @() `
+        -StaleDays 365 `
+        -LargeFileBytes 200 `
+        -DuplicateMinBytes 4 `
+        -StaleMinBytes 4 `
+        -Now ([datetime]::UtcNow)
+    $chelseaSources = @($chelseaPlan.Moves | ForEach-Object { $_.Source })
+    Assert-Equal @($chelseaPlan.Moves).Count 1 'Only the loose document is planned'
+    Assert-True ($chelseaSources[0] -eq ([System.IO.Path]::GetFullPath($chelseaNote))) 'Desktop\Documents file is organized'
+    Assert-Equal $chelseaPlan.Moves[0].Reason 'organize-doc' 'The lesson is filed as a document'
+    foreach ($source in $chelseaSources) {
+        Assert-True ($source -notmatch '\.gemini') '.gemini is not moved'
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $gemini 'settings.json')) 'Gemini settings stay on disk before a move'
 }
 finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
