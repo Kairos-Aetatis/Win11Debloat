@@ -1,6 +1,9 @@
 # Organizes loose documents and moves duplicates, long-unopened files, videos,
 # images, and large files to an archive folder. Nothing in here is deleted.
-# A manifest under Logs/LaptopCleanup records every move so it can be undone.
+# Documents are filed by subject when the name or text is clear, and by file
+# type otherwise. Each move is hash-checked before the original is removed.
+# A manifest under Logs/LaptopCleanup records every move so it can be undone,
+# and a review index is written beside the organized files and the archive.
 # Preinstalled apps are removed only when they are known bloat or OEM software
 # and Windows has no record of them being opened.
 
@@ -118,11 +121,34 @@ function Test-StorageHomeUsable {
 
 function Get-CleanupSkipDirectoryNames {
     return @(
-        'node_modules', '.git', '.svn', '.hg', 'AppData', 'Application Data',
+        'node_modules', '.git', '.svn', '.hg', '.vscode', '.idea',
+        'AppData', 'Application Data', 'Local Settings',
         'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
         '$Recycle.Bin', 'System Volume Information', 'Win11Debloat',
         '.gemini'
     )
+}
+
+function Get-CleanupProtectionMarkerNames {
+    return @('.do_not_organize', '.protected', '.organizer_ignore')
+}
+
+function Test-CleanupProtectedDirectory {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $false
+    }
+
+    foreach ($name in (Get-CleanupProtectionMarkerNames)) {
+        if (Test-Path -LiteralPath (Join-Path $Path $name)) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Test-CleanupPathIsGemini {
@@ -220,12 +246,23 @@ function Test-CleanupSkipFileName {
         'ntuser.dat' { return $true }
     }
 
+    foreach ($marker in (Get-CleanupProtectionMarkerNames)) {
+        if ($lowerName -eq $marker) {
+            return $true
+        }
+    }
+
     switch ($Extension) {
         '.lnk' { return $true }
         '.tmp' { return $true }
         '.partial' { return $true }
         '.crdownload' { return $true }
         '.download' { return $true }
+        '.exe' { return $true }
+        '.dll' { return $true }
+        '.sys' { return $true }
+        '.ini' { return $true }
+        '.log' { return $true }
     }
 
     return $false
@@ -268,6 +305,10 @@ function Get-CleanupFiles {
     while ($index -lt $pending.Count) {
         $dir = $pending[$index]
         $index++
+
+        if (Test-CleanupProtectedDirectory -Path $dir) {
+            continue
+        }
 
         try {
             $children = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop)
@@ -378,6 +419,85 @@ function Get-DocumentCategory {
     }
 }
 
+function Get-DocumentSubjectTable {
+    return @(
+        [pscustomobject]@{ Name = 'Legal'; Words = @('contract', 'agreement', 'patent', 'trademark', 'copyright', 'lawsuit', 'indemnification', 'non-disclosure') },
+        [pscustomobject]@{ Name = 'Financial'; Words = @('invoice', 'receipt', 'budget', 'payroll', 'expense', 'bank statement', 'tax return') },
+        [pscustomobject]@{ Name = 'Research'; Words = @('research', 'hypothesis', 'findings', 'literature review') },
+        [pscustomobject]@{ Name = 'Personal'; Words = @('resume', 'curriculum vitae', 'passport', 'medical record') },
+        [pscustomobject]@{ Name = 'Work'; Words = @('proposal', 'roadmap', 'meeting notes', 'statement of work') }
+    )
+}
+
+function Test-CleanupTextHasWord {
+    param(
+        [string]$Text,
+        [string]$Word
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Word)) {
+        return $false
+    }
+
+    $pattern = '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($Word) + '(?![A-Za-z0-9])'
+    return $Text -match $pattern
+}
+
+function Get-DocumentSubjectSample {
+    param(
+        $File
+    )
+
+    $sample = [string]$File.Name
+    switch ($File.Extension) {
+        '.txt' { }
+        '.md' { }
+        '.csv' { }
+        '.tex' { }
+        '.rtf' { }
+        default { return $sample }
+    }
+
+    $reader = $null
+    try {
+        $reader = New-Object System.IO.StreamReader($File.FullName)
+        $buffer = New-Object char[] 2000
+        $read = $reader.Read($buffer, 0, $buffer.Length)
+        if ($read -gt 0) {
+            $sample = $sample + ' ' + (-join $buffer[0..($read - 1)])
+        }
+    }
+    catch {
+        return $sample
+    }
+    finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
+    }
+
+    return $sample
+}
+
+# Subject comes from the file name, plus the opening text of plain-text files.
+# Office and PDF files are classified from the name only.
+function Get-DocumentSubject {
+    param(
+        $File
+    )
+
+    $sample = Get-DocumentSubjectSample -File $File
+    foreach ($subject in (Get-DocumentSubjectTable)) {
+        foreach ($word in @($subject.Words)) {
+            if (Test-CleanupTextHasWord -Text $sample -Word $word) {
+                return [string]$subject.Name
+            }
+        }
+    }
+
+    return $null
+}
+
 function Test-CleanupImageExtension {
     param([string]$Extension)
 
@@ -460,9 +580,27 @@ function Get-DuplicateKeeperScore {
         $score -= 40
     }
 
+    # "Copy of", "notes-copy", and "file (1)" lose to the plain file name.
+    # The penalty is smaller than the library preference above.
+    if (Test-CleanupDuplicateAliasName -Name $File.Name) {
+        $score -= 20
+    }
+
     # Newer copies win ties, without outweighing the library preference above.
     $score += ([double]$File.LastWriteTimeUtc.Ticks / 1000000000000000)
     return $score
+}
+
+function Test-CleanupDuplicateAliasName {
+    param(
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $false
+    }
+
+    return $Name -match '(?i)(^copy of )|(\scopy\b)|(\(\d+\))|(\s-\s*copy\b)|(-copy\b)'
 }
 
 function Get-DuplicateKeeper {
@@ -686,6 +824,7 @@ function Get-LaptopCleanupPlan {
         $reason = $assignments[$file.FullName]
         $relative = Get-CleanupRelativePath -FullName $file.FullName -ScanRoots $ScanRoots
         $destination = $null
+        $subject = $null
         switch ($reason) {
             'duplicate' {
                 $hash = $duplicateExtras[$file.FullName]
@@ -707,7 +846,13 @@ function Get-LaptopCleanupPlan {
             }
             'organize-doc' {
                 $category = Get-DocumentCategory -Extension $file.Extension
-                $destination = Join-Path (Join-Path $OrganizedRoot $category) $file.Name
+                $subject = Get-DocumentSubject -File $file
+                if ([string]::IsNullOrWhiteSpace($subject)) {
+                    $destination = Join-Path (Join-Path $OrganizedRoot $category) $file.Name
+                }
+                else {
+                    $destination = Join-Path (Join-Path (Join-Path $OrganizedRoot $subject) $category) $file.Name
+                }
             }
         }
 
@@ -719,10 +864,16 @@ function Get-LaptopCleanupPlan {
         }
 
         $destination = Get-UniqueCleanupDestination -Path $destination -Reserved $reserved
+        $care = $false
+        if ($subject -eq 'Legal' -or $subject -eq 'Financial') {
+            $care = $true
+        }
         $moves.Add([pscustomobject]@{
             Source = $file.FullName
             Destination = $destination
             Reason = $reason
+            Subject = $subject
+            Care = $care
             Bytes = $file.Length
             Status = 'planned'
         })
@@ -731,6 +882,14 @@ function Get-LaptopCleanupPlan {
     return [pscustomobject]@{
         Moves = $moves.ToArray()
     }
+}
+
+function Get-CleanupSha256 {
+    param(
+        [string]$Path
+    )
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
 function Move-LaptopCleanupFile {
@@ -744,21 +903,25 @@ function Move-LaptopCleanupFile {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    $sourceRoot = [System.IO.Path]::GetPathRoot($Source)
-    $destinationRoot = [System.IO.Path]::GetPathRoot($Destination)
-    $sameVolume = $sourceRoot.Equals($destinationRoot, [System.StringComparison]::OrdinalIgnoreCase)
-    if ($sameVolume) {
-        Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
-        return
+    $sourceLength = (Get-Item -LiteralPath $Source -Force).Length
+    $sourceHash = Get-CleanupSha256 -Path $Source
+    Copy-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+
+    $verified = $false
+    try {
+        $destinationLength = (Get-Item -LiteralPath $Destination -Force).Length
+        $destinationHash = Get-CleanupSha256 -Path $Destination
+        if ($sourceLength -eq $destinationLength -and $sourceHash -eq $destinationHash) {
+            $verified = $true
+        }
+    }
+    catch {
+        $verified = $false
     }
 
-    # Across drives, copy first and only remove the original after the size matches.
-    Copy-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
-    $sourceLength = (Get-Item -LiteralPath $Source -Force).Length
-    $destinationLength = (Get-Item -LiteralPath $Destination -Force).Length
-    if ($sourceLength -ne $destinationLength) {
+    if (-not $verified) {
         Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-        throw "Copied file size did not match, so the original was left in place."
+        throw "Copied file did not match the original, so the original was left in place."
     }
 
     Remove-Item -LiteralPath $Source -Force -ErrorAction Stop
@@ -901,7 +1064,143 @@ function Restore-LaptopFileMoves {
         }
     }
 
+    $indexPaths = @()
+    if ($manifest.PSObject.Properties['indexes'] -and $manifest.indexes) {
+        $indexPaths = @($manifest.indexes)
+    }
+    elseif ($manifest.PSObject.Properties['Indexes'] -and $manifest.Indexes) {
+        $indexPaths = @($manifest.Indexes)
+    }
+    foreach ($indexPath in $indexPaths) {
+        $pathText = ''
+        if ($indexPath -is [string]) {
+            $pathText = [string]$indexPath
+        }
+        elseif ($indexPath.PSObject.Properties['Path']) {
+            $pathText = [string]$indexPath.Path
+        }
+        elseif ($indexPath.PSObject.Properties['path']) {
+            $pathText = [string]$indexPath.path
+        }
+        if ([string]::IsNullOrWhiteSpace($pathText)) {
+            continue
+        }
+        if (Test-Path -LiteralPath $pathText -PathType Leaf) {
+            Remove-Item -LiteralPath $pathText -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Write-Host "Restored $restored file(s)."
+}
+
+function Get-CleanupMoveProperty {
+    param(
+        $Move,
+        [string]$Name
+    )
+
+    $property = $Move.PSObject.Properties[$Name]
+    if ($property) {
+        return [string]$property.Value
+    }
+
+    $alt = $Name.Substring(0, 1).ToLowerInvariant() + $Name.Substring(1)
+    $altProperty = $Move.PSObject.Properties[$alt]
+    if ($altProperty) {
+        return [string]$altProperty.Value
+    }
+
+    return ''
+}
+
+function Write-LaptopCleanupIndexes {
+    param(
+        [object[]]$Moves,
+        [string]$OrganizedRoot,
+        [string]$StorageHome
+    )
+
+    $created = New-Object System.Collections.Generic.List[string]
+    $moved = @($Moves | Where-Object {
+        $_ -and ((Get-CleanupMoveProperty -Move $_ -Name 'Status') -eq 'moved')
+    })
+    if ($moved.Count -eq 0) {
+        return @()
+    }
+
+    $organized = @($moved | Where-Object { (Get-CleanupMoveProperty -Move $_ -Name 'Reason') -eq 'organize-doc' })
+    if ($organized.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($OrganizedRoot)) {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('# Organized documents')
+        $lines.Add('')
+        $lines.Add('Loose documents were sorted here. A subject folder is used when the file name or opening text names one. Other documents are sorted by file type.')
+        $lines.Add('')
+        $groups = @{}
+        foreach ($move in $organized) {
+            $subject = Get-CleanupMoveProperty -Move $move -Name 'Subject'
+            if ([string]::IsNullOrWhiteSpace($subject)) {
+                $subject = 'Other'
+            }
+            if (-not $groups.ContainsKey($subject)) {
+                $groups[$subject] = New-Object System.Collections.Generic.List[string]
+            }
+            $destination = Get-CleanupMoveProperty -Move $move -Name 'Destination'
+            $relative = $destination
+            $rootFull = [System.IO.Path]::GetFullPath($OrganizedRoot).TrimEnd('\', '/')
+            $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+            if ($destination.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $relative = $destination.Substring($prefix.Length)
+            }
+            $groups[$subject].Add($relative)
+        }
+        foreach ($subject in ($groups.Keys | Sort-Object)) {
+            $lines.Add("## $subject")
+            $lines.Add('')
+            foreach ($relative in $groups[$subject]) {
+                $lines.Add("- $relative")
+            }
+            $lines.Add('')
+        }
+        $indexPath = Join-Path $OrganizedRoot 'INDEX.md'
+        New-Item -ItemType Directory -Path $OrganizedRoot -Force | Out-Null
+        [System.IO.File]::WriteAllText($indexPath, ($lines -join [Environment]::NewLine))
+        $created.Add($indexPath)
+    }
+
+    $archived = @($moved | Where-Object { (Get-CleanupMoveProperty -Move $_ -Name 'Reason') -ne 'organize-doc' })
+    if ($archived.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($StorageHome)) {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('# Archive review')
+        $lines.Add('')
+        $lines.Add('These copies were moved out of the working folders. Duplicate extras were archived and one copy was kept. Nothing in this folder was deleted.')
+        $lines.Add('')
+        $labels = [ordered]@{
+            duplicate = 'Duplicates'
+            stale = 'Long-unopened'
+            video = 'Videos'
+            image = 'Images'
+            large = 'Large files'
+        }
+        foreach ($key in $labels.Keys) {
+            $group = @($archived | Where-Object { (Get-CleanupMoveProperty -Move $_ -Name 'Reason') -eq $key })
+            if ($group.Count -eq 0) {
+                continue
+            }
+            $lines.Add("## $($labels[$key])")
+            $lines.Add('')
+            foreach ($move in $group) {
+                $destination = Get-CleanupMoveProperty -Move $move -Name 'Destination'
+                $lines.Add("- $destination")
+            }
+            $lines.Add('')
+        }
+        $reviewPath = Join-Path $StorageHome 'REVIEW.md'
+        New-Item -ItemType Directory -Path $StorageHome -Force | Out-Null
+        [System.IO.File]::WriteAllText($reviewPath, ($lines -join [Environment]::NewLine))
+        $created.Add($reviewPath)
+    }
+
+    return $created.ToArray()
 }
 
 function Get-LatestLaptopCleanupManifestPath {
@@ -1269,6 +1568,16 @@ function Get-LaptopCleanupSummary {
     }
     if ($docCount -gt 0) {
         $lines.Add(("- Sort {0} document(s) into {1}" -f $docCount, $OrganizedRoot))
+    }
+
+    $careCount = 0
+    foreach ($move in @($Moves)) {
+        if ($move -and ($move.Care -eq $true)) {
+            $careCount++
+        }
+    }
+    if ($careCount -gt 0) {
+        $lines.Add(("- File {0} legal or financial document(s) in their own folders so they can be reviewed" -f $careCount))
     }
 
     $remoteBits = New-Object System.Collections.Generic.List[string]
@@ -1903,6 +2212,20 @@ function Invoke-LaptopCleanup {
     if (@($plan.Moves).Count -gt 0) {
         $manifestPath = Join-Path $logRoot ("manifest-{0}.json" -f $stamp)
         $manifest = Invoke-LaptopFileMoves -Moves $plan.Moves -ManifestPath $manifestPath
+        $indexEntries = @()
+        try {
+            $indexPaths = @(Write-LaptopCleanupIndexes -Moves @($manifest.moves) -OrganizedRoot $folders.OrganizedRoot -StorageHome $storageHome)
+            foreach ($indexPath in $indexPaths) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$indexPath)) {
+                    $indexEntries += [pscustomobject]@{ Path = [string]$indexPath }
+                }
+            }
+        }
+        catch {
+            Write-Host "Could not write the review index. $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        $manifest | Add-Member -NotePropertyName indexes -NotePropertyValue $indexEntries -Force
+        Write-LaptopCleanupJson -Object $manifest -Path $manifestPath
         $movedCount = @($manifest.moves | Where-Object { $_.Status -eq 'moved' }).Count
         if ($movedCount -gt 0) {
             $latestPath = Join-Path $logRoot 'latest.txt'

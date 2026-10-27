@@ -107,6 +107,14 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $desktop 'desktop.ini'), "ignored")
     [System.IO.File]::WriteAllText((Join-Path $desktop 'Thumbs.db'), "ignored")
     [System.IO.File]::WriteAllText((Join-Path $nodeModules 'secret.txt'), "do not take files out of node_modules")
+    $private = Join-Path $desktop 'Private'
+    $vscode = Join-Path $desktop '.vscode'
+    New-Item -ItemType Directory -Path $private | Out-Null
+    New-Item -ItemType Directory -Path $vscode | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $private '.do_not_organize'), "keep")
+    [System.IO.File]::WriteAllText((Join-Path $private 'secret-plan.txt'), "A contract that stays in the marked folder.")
+    [System.IO.File]::WriteAllText((Join-Path $vscode 'settings.txt'), "Editor settings stay put.")
+    [System.IO.File]::WriteAllText((Join-Path $desktop 'setup.exe'), "Do not relocate programs from the Desktop.")
 
     $symlinkCreated = $false
     $symlink = Join-Path $desktop 'linked.txt'
@@ -148,6 +156,9 @@ try {
     Assert-True ($bySource['report.pdf'].Destination -match 'PDFs') 'PDFs get a PDF folder'
     Assert-Equal $bySource['budget.csv'].Reason 'organize-doc' 'Loose spreadsheets are organized'
     Assert-True ($bySource['budget.csv'].Destination -match 'Spreadsheets') 'Spreadsheets get their own folder'
+    Assert-True ($bySource['budget.csv'].Destination -match 'Financial') 'A budget is filed under Financial'
+    Assert-Equal $bySource['budget.csv'].Subject 'Financial' 'The budget subject is recorded on the move'
+    Assert-Equal $bySource['budget.csv'].Care $true 'Financial documents are marked for review'
 
     Assert-Equal $bySource['notes-copy.txt'].Reason 'duplicate' 'Older duplicate notes are archived'
     Assert-True ($bySource['notes-copy.txt'].Destination -match 'Duplicates') 'Duplicate copies go to the duplicate archive'
@@ -169,6 +180,9 @@ try {
     Assert-True (-not $bySource.ContainsKey('desktop.ini')) 'desktop.ini is ignored'
     Assert-True (-not $bySource.ContainsKey('Thumbs.db')) 'Thumbs.db is ignored'
     Assert-True (-not $bySource.ContainsKey('secret.txt')) 'node_modules is not scanned'
+    Assert-True (-not $bySource.ContainsKey('secret-plan.txt')) 'A folder marked .do_not_organize is not scanned'
+    Assert-True (-not $bySource.ContainsKey('settings.txt')) '.vscode is not scanned'
+    Assert-True (-not $bySource.ContainsKey('setup.exe')) 'Programs on the Desktop are not moved'
     Assert-True (-not $bySource.ContainsKey('already.jpg')) 'The archive folder inside Desktop is not scanned again'
     if ($symlinkCreated) {
         Assert-True (-not $bySource.ContainsKey('linked.txt')) 'Symlinks are not followed or moved'
@@ -177,6 +191,18 @@ try {
 
     $manifestPath = Join-Path $temp 'manifest.json'
     $manifest = Invoke-LaptopFileMoves -Moves $plan.Moves -ManifestPath $manifestPath
+    $indexPaths = @(Write-LaptopCleanupIndexes -Moves @($manifest.moves) -OrganizedRoot (Join-Path $documents 'Organized') -StorageHome $storageHome)
+    $organizedIndex = Join-Path (Join-Path $documents 'Organized') 'INDEX.md'
+    $archiveReview = Join-Path $storageHome 'REVIEW.md'
+    Assert-True (Test-Path -LiteralPath $organizedIndex) 'Organized documents get an index'
+    Assert-True (Test-Path -LiteralPath $archiveReview) 'The archive gets a review list'
+    $indexText = [System.IO.File]::ReadAllText($organizedIndex)
+    Assert-True ($indexText -match 'Financial') 'The index names the Financial folder'
+    Assert-True ($indexText -match 'budget\.csv') 'The index lists the budget'
+    Assert-True ([System.IO.File]::ReadAllText($archiveReview) -match 'notes-copy') 'The review lists the archived duplicate'
+    $indexEntries = @($indexPaths | ForEach-Object { [pscustomobject]@{ Path = [string]$_ } })
+    $manifest | Add-Member -NotePropertyName indexes -NotePropertyValue $indexEntries -Force
+    Write-LaptopCleanupJson -Object $manifest -Path $manifestPath
     $moved = @($manifest.moves | Where-Object { $_.Status -eq 'moved' -or $_.status -eq 'moved' })
     Assert-Equal $moved.Count 11 'Every planned file is moved'
     Assert-True (-not (Test-Path -LiteralPath $notes)) 'Organized notes leave the Desktop'
@@ -187,6 +213,8 @@ try {
     Restore-LaptopFileMoves -ManifestPath $manifestPath
     Assert-True (Test-Path -LiteralPath $notes) 'Undo puts notes back on the Desktop'
     Assert-True (-not (Test-Path -LiteralPath $bySource['notes.txt'].Destination)) 'Undo removes the organized copy'
+    Assert-True (-not (Test-Path -LiteralPath $organizedIndex)) 'Undo removes the organized index'
+    Assert-True (-not (Test-Path -LiteralPath $archiveReview)) 'Undo removes the archive review'
     Assert-Equal ([System.IO.File]::ReadAllText($notes)) $sharedNotes 'Restored notes keep their contents'
     Assert-True (Test-Path -LiteralPath $movie) 'Undo puts the extra video back'
     Assert-True (Test-Path -LiteralPath $big) 'Undo puts the large file back'
@@ -341,6 +369,34 @@ try {
         Assert-True ($source -notmatch '\.gemini') '.gemini is not moved'
     }
     Assert-True (Test-Path -LiteralPath (Join-Path $gemini 'settings.json')) 'Gemini settings stay on disk before a move'
+
+    $aliasRoot = Join-Path $temp 'AliasDesktop'
+    New-Item -ItemType Directory -Path $aliasRoot | Out-Null
+    $agreement = "The signed agreement stays with the plain file name.`r`n"
+    $plain = Join-Path $aliasRoot 'agreement.txt'
+    $alias = Join-Path $aliasRoot 'Copy of agreement.txt'
+    [System.IO.File]::WriteAllText($plain, $agreement)
+    [System.IO.File]::WriteAllText($alias, $agreement)
+    Set-OldTimestamp -Path $plain -DaysAgo 30
+    $aliasPlan = Get-LaptopCleanupPlan `
+        -ScanRoots @($aliasRoot) `
+        -LooseDocRoots @($aliasRoot) `
+        -LibraryRoots @($aliasRoot) `
+        -OrganizedRoot (Join-Path $aliasRoot 'Organized') `
+        -StorageHome (Join-Path $temp 'AliasArchive') `
+        -ExcludeRoots @() `
+        -StaleDays 365 `
+        -LargeFileBytes 200 `
+        -DuplicateMinBytes 4 `
+        -StaleMinBytes 4 `
+        -Now ([datetime]::UtcNow)
+    $aliasByName = @{}
+    foreach ($move in @($aliasPlan.Moves)) {
+        $aliasByName[[System.IO.Path]::GetFileName($move.Source)] = $move
+    }
+    Assert-Equal $aliasByName['agreement.txt'].Reason 'organize-doc' 'The plain file name is the copy that stays'
+    Assert-True ($aliasByName['agreement.txt'].Destination -match 'Legal') 'An agreement is filed under Legal'
+    Assert-Equal $aliasByName['Copy of agreement.txt'].Reason 'duplicate' 'A newer Copy of file is the extra'
 }
 finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
