@@ -104,6 +104,18 @@ Below is an overview of the key features and functionality offered by Win11Deblo
 - Disable AI Features in Paint.
 - Disable AI Features in Notepad.
 
+#### Storage
+
+- Organize loose documents from the Desktop, Downloads, and Documents folders into `Documents\Organized`.
+- Move duplicate copies, files that have not been opened for a year, videos, images, and files larger than 100 MB to another drive, a network folder, or OneDrive. Files are moved, not deleted.
+- Remove known preinstalled apps that have never been opened, including third-party apps that came with the PC rather than apps you installed yourself.
+- Put moved files back with `-UndoLaptopCleanup`.
+
+```PowerShell
+.\Win11Debloat.ps1 -LaptopCleanup -StorageHome "D:\LaptopArchive"
+.\Win11Debloat.ps1 -UndoLaptopCleanup
+```
+
 #### System
 
 - Disable the Drag Tray for sharing & moving files.

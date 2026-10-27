@@ -100,7 +100,15 @@ param (
     [switch]$ShowDriveLettersFirst,
     [switch]$ShowDriveLettersLast,
     [switch]$ShowNetworkDriveLettersFirst,
-    [switch]$HideDriveLetters
+    [switch]$HideDriveLetters,
+    [switch]$LaptopCleanup,
+    [switch]$ApplyLaptopCleanup,
+    [switch]$UndoLaptopCleanup,
+    [string]$StorageHome,
+    [ValidateRange(30, 3650)]
+    [int]$StaleDays = 365,
+    [ValidateRange(10, 102400)]
+    [int]$LargeFileMB = 100
 )
 
 # Show error if current powershell environment does not have LanguageMode set to FullLanguage 

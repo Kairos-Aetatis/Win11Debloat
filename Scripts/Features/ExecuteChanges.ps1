@@ -122,6 +122,20 @@ function ExecuteParameter {
             ReplaceStartMenuForAllUsers $script:Params.Item("ReplaceStartAllUsers")
             return
         }
+        'LaptopCleanup' {
+            # The GUI can select cleanup and undo together. Undo wins so files are not archived again.
+            if ($script:Params.ContainsKey('UndoLaptopCleanup')) {
+                Write-Host "Undo was requested, so laptop cleanup will not run in the same pass." -ForegroundColor Yellow
+                Write-Host ""
+                return
+            }
+            Invoke-LaptopCleanup
+            return
+        }
+        'UndoLaptopCleanup' {
+            Restore-LaptopCleanup
+            return
+        }
         'DisableStoreSearchSuggestions' {
             if ($script:Params.ContainsKey("Sysprep")) {
                 Write-Host "> Disabling Microsoft Store search suggestions in the start menu for all users..."
