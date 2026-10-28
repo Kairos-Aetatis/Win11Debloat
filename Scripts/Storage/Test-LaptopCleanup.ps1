@@ -160,10 +160,13 @@ try {
     Assert-Equal $bySource['budget.csv'].Subject 'Financial' 'The budget subject is recorded on the move'
     Assert-Equal $bySource['budget.csv'].Care $true 'Financial documents are marked for review'
 
-    Assert-Equal $bySource['notes-copy.txt'].Reason 'duplicate' 'Older duplicate notes are archived'
-    Assert-True ($bySource['notes-copy.txt'].Destination -match 'Duplicates') 'Duplicate copies go to the duplicate archive'
+    Assert-Equal $bySource['notes-copy.txt'].Reason 'duplicate' 'Older duplicate notes are the extra copy'
+    Assert-Equal $bySource['notes-copy.txt'].Action 'consolidate' 'Duplicate documents are pasted into a category file'
+    Assert-True ($bySource['notes-copy.txt'].Destination -match 'Duplicates') 'Duplicate documents go to the duplicates folder'
+    Assert-True ($bySource['notes-copy.txt'].Destination -match 'Text\.md') 'Notes are pasted into the Text category document'
     Assert-Equal $bySource['movie.mp4'].Reason 'duplicate' 'Desktop copy of a video is the extra'
-    Assert-True ($bySource['movie.mp4'].Destination -match 'Duplicates') 'Extra video copy is stored with duplicates'
+    Assert-Equal $bySource['movie.mp4'].Action 'remove-duplicate' 'A non-document duplicate is removed after it matches'
+    Assert-True ($bySource['movie.mp4'].Keeper -match 'clip\.mp4$') 'The video extra points at the kept copy'
     Assert-Equal $bySource['clip.mp4'].Reason 'video' 'Library video is the copy that is filed as video'
     Assert-True ($bySource['clip.mp4'].Destination -match 'Videos') 'Videos are filed under Videos'
 
@@ -203,8 +206,16 @@ try {
     $indexEntries = @($indexPaths | ForEach-Object { [pscustomobject]@{ Path = [string]$_ } })
     $manifest | Add-Member -NotePropertyName indexes -NotePropertyValue $indexEntries -Force
     Write-LaptopCleanupJson -Object $manifest -Path $manifestPath
-    $moved = @($manifest.moves | Where-Object { $_.Status -eq 'moved' -or $_.status -eq 'moved' })
-    Assert-Equal $moved.Count 11 'Every planned file is moved'
+    $finished = @($manifest.moves | Where-Object {
+        $_.Status -in @('moved', 'consolidated', 'removed') -or $_.status -in @('moved', 'consolidated', 'removed')
+    })
+    Assert-Equal $finished.Count 11 'Every planned file is finished'
+    $notesCategory = Join-Path (Join-Path $storageHome 'Duplicates') 'Text.md'
+    Assert-True (-not (Test-Path -LiteralPath $notesCopy)) 'The extra notes file is removed after it is pasted'
+    Assert-True (-not (Test-Path -LiteralPath $movie)) 'The extra video is removed after it matches the kept copy'
+    $pastedNotes = [System.IO.File]::ReadAllText($notesCategory)
+    Assert-True ($pastedNotes -match '## notes-copy\.txt') 'The category document is labeled with the original title'
+    Assert-True ($pastedNotes -match 'notes that should stay') 'The category document contains the duplicate text'
     Assert-True (-not (Test-Path -LiteralPath $notes)) 'Organized notes leave the Desktop'
     Assert-True (Test-Path -LiteralPath $bySource['notes.txt'].Destination) 'Organized notes arrive in Documents'
     Assert-True (Test-Path -LiteralPath $kept) 'Untouched files are not removed'
@@ -217,6 +228,10 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $archiveReview)) 'Undo removes the archive review'
     Assert-Equal ([System.IO.File]::ReadAllText($notes)) $sharedNotes 'Restored notes keep their contents'
     Assert-True (Test-Path -LiteralPath $movie) 'Undo puts the extra video back'
+    Assert-Equal ([System.IO.File]::ReadAllText($notesCopy)) $sharedNotes 'Undo puts the pasted notes back'
+    Assert-True (-not (Test-Path -LiteralPath $notesCategory)) 'Undo removes the category document after its section is restored'
+    $restoredMovie = [System.IO.File]::ReadAllBytes($movie)
+    Assert-Equal $restoredMovie.Length $clipBytes.Length 'Undo restores the extra video bytes'
     Assert-True (Test-Path -LiteralPath $big) 'Undo puts the large file back'
 
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -397,6 +412,25 @@ try {
     Assert-Equal $aliasByName['agreement.txt'].Reason 'organize-doc' 'The plain file name is the copy that stays'
     Assert-True ($aliasByName['agreement.txt'].Destination -match 'Legal') 'An agreement is filed under Legal'
     Assert-Equal $aliasByName['Copy of agreement.txt'].Reason 'duplicate' 'A newer Copy of file is the extra'
+    Assert-True ($aliasByName['Copy of agreement.txt'].Destination -match 'Legal\.md') 'The agreement duplicate is pasted under Legal'
+    $aliasManifest = Join-Path $temp 'alias-manifest.json'
+    Invoke-LaptopFileMoves -Moves $aliasPlan.Moves -ManifestPath $aliasManifest | Out-Null
+    $legalDoc = Join-Path (Join-Path $temp 'AliasArchive') (Join-Path 'Duplicates' 'Legal.md')
+    Assert-True (-not (Test-Path -LiteralPath $alias)) 'The extra agreement is removed after the text matches'
+    $legalText = [System.IO.File]::ReadAllText($legalDoc)
+    Assert-True ($legalText -match '## Copy of agreement\.txt') 'The Legal document keeps the original title'
+    Assert-True ($legalText -match 'signed agreement') 'The Legal document contains the agreement text'
+    Assert-True (Test-Path -LiteralPath $aliasByName['agreement.txt'].Destination) 'The plain agreement is organized'
+    Restore-LaptopFileMoves -ManifestPath $aliasManifest
+    Assert-True (Test-Path -LiteralPath $alias) 'Undo puts the pasted agreement back'
+    Assert-Equal ([System.IO.File]::ReadAllText($alias)) $agreement 'The restored agreement keeps its text'
+
+    $mismatchA = Join-Path $temp 'mismatch-a.txt'
+    $mismatchB = Join-Path $temp 'mismatch-b.txt'
+    [System.IO.File]::WriteAllText($mismatchA, 'alpha text')
+    [System.IO.File]::WriteAllText($mismatchB, 'beta value')
+    Assert-True (-not (Test-CleanupDuplicateContext -ExtraPath $mismatchB -KeeperPath $mismatchA)) 'Different text is not treated as the same duplicate'
+    Assert-True (Test-CleanupDuplicateContext -ExtraPath $notes -KeeperPath $notes) 'A file matches its own context'
 }
 finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue

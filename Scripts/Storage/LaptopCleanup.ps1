@@ -1,9 +1,9 @@
-# Organizes loose documents and moves duplicates, long-unopened files, videos,
-# images, and large files to an archive folder. Nothing in here is deleted.
-# Documents are filed by subject when the name or text is clear, and by file
-# type otherwise. Each move is hash-checked before the original is removed.
-# A manifest under Logs/LaptopCleanup records every move so it can be undone,
-# and a review index is written beside the organized files and the archive.
+# Organizes loose documents and moves long-unopened files, videos, images,
+# and large files to an archive folder. The first copy of a duplicate is kept.
+# Later copies of a document are pasted into one category file, labeled with
+# their original titles, and the extra file is removed only after the text
+# matches. Other extra copies are removed only after the file bytes match.
+# A manifest under Logs/LaptopCleanup records every change so it can be undone.
 # Preinstalled apps are removed only when they are known bloat or OEM software
 # and Windows has no record of them being opened.
 
@@ -776,7 +776,10 @@ function Get-LaptopCleanupPlan {
         $keeper = Get-DuplicateKeeper -Files $group.ToArray() -LibraryRoots $LibraryRoots
         foreach ($file in $group) {
             if ($file.FullName -ne $keeper.FullName) {
-                $duplicateExtras[$file.FullName] = $hash
+                $duplicateExtras[$file.FullName] = [pscustomobject]@{
+                    Hash = $hash
+                    Keeper = [string]$keeper.FullName
+                }
             }
         }
     }
@@ -825,11 +828,28 @@ function Get-LaptopCleanupPlan {
         $relative = Get-CleanupRelativePath -FullName $file.FullName -ScanRoots $ScanRoots
         $destination = $null
         $subject = $null
+        $action = 'move'
+        $keeperPath = $null
+        $categoryLabel = $null
         switch ($reason) {
             'duplicate' {
-                $hash = $duplicateExtras[$file.FullName]
-                $prefix = $hash.Substring(0, [Math]::Min(8, $hash.Length))
-                $destination = Join-Path (Join-Path (Join-Path $StorageHome 'Duplicates') $prefix) $file.Name
+                $info = $duplicateExtras[$file.FullName]
+                $keeperPath = [string]$info.Keeper
+                $docCategory = Get-DocumentCategory -Extension $file.Extension
+                if ($docCategory) {
+                    $subject = Get-DocumentSubject -File $file
+                    $categoryLabel = $docCategory
+                    if (-not [string]::IsNullOrWhiteSpace($subject)) {
+                        $categoryLabel = $subject
+                    }
+                    $destination = Join-Path (Join-Path $StorageHome 'Duplicates') ($categoryLabel + '.md')
+                    $action = 'consolidate'
+                }
+                else {
+                    $destination = $keeperPath
+                    $categoryLabel = 'Files'
+                    $action = 'remove-duplicate'
+                }
             }
             'video' {
                 $destination = Join-Path (Join-Path $StorageHome 'Videos') $relative
@@ -859,11 +879,13 @@ function Get-LaptopCleanupPlan {
         if ([string]::IsNullOrWhiteSpace($destination)) {
             continue
         }
-        if (Test-CleanupPathEquals -Left $file.FullName -Right $destination) {
+        if ($action -eq 'move' -and (Test-CleanupPathEquals -Left $file.FullName -Right $destination)) {
             continue
         }
 
-        $destination = Get-UniqueCleanupDestination -Path $destination -Reserved $reserved
+        if ($action -eq 'move') {
+            $destination = Get-UniqueCleanupDestination -Path $destination -Reserved $reserved
+        }
         $care = $false
         if ($subject -eq 'Legal' -or $subject -eq 'Financial') {
             $care = $true
@@ -872,6 +894,11 @@ function Get-LaptopCleanupPlan {
             Source = $file.FullName
             Destination = $destination
             Reason = $reason
+            Action = $action
+            Keeper = $keeperPath
+            CategoryLabel = $categoryLabel
+            Title = [string]$file.Name
+            DedupeId = [guid]::NewGuid().ToString('N')
             Subject = $subject
             Care = $care
             Bytes = $file.Length
@@ -890,6 +917,274 @@ function Get-CleanupSha256 {
     )
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-CleanupComparableText {
+    param(
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return $null
+    }
+
+    return ([regex]::Replace($Text, '\s+', ' ').Trim().ToLowerInvariant())
+}
+
+function Get-CleanupDocxText {
+    param(
+        [string]$Path
+    )
+
+    $zip = $null
+    $reader = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $entry = $zip.GetEntry('word/document.xml')
+        if (-not $entry) {
+            return $null
+        }
+
+        $reader = New-Object System.IO.StreamReader($entry.Open())
+        $xml = $reader.ReadToEnd()
+        $xml = $xml -replace '</w:p>', "`n"
+        $xml = $xml -replace '<[^>]+>', ''
+        return [System.Net.WebUtility]::HtmlDecode($xml)
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
+        if ($zip) {
+            $zip.Dispose()
+        }
+    }
+}
+
+function Get-CleanupReadableText {
+    param(
+        [string]$Path
+    )
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    switch ($extension) {
+        '.txt' { return [System.IO.File]::ReadAllText($Path) }
+        '.md' { return [System.IO.File]::ReadAllText($Path) }
+        '.csv' { return [System.IO.File]::ReadAllText($Path) }
+        '.tex' { return [System.IO.File]::ReadAllText($Path) }
+        '.rtf' { return [System.IO.File]::ReadAllText($Path) }
+        '.docx' { return Get-CleanupDocxText -Path $Path }
+        default { return $null }
+    }
+}
+
+# Hash match is required. Readable documents must also match once whitespace is ignored.
+function Test-CleanupDuplicateContext {
+    param(
+        [string]$ExtraPath,
+        [string]$KeeperPath
+    )
+
+    if (-not (Test-Path -LiteralPath $ExtraPath) -or -not (Test-Path -LiteralPath $KeeperPath)) {
+        return $false
+    }
+
+    $extraHash = Get-CleanupSha256 -Path $ExtraPath
+    $keeperHash = Get-CleanupSha256 -Path $KeeperPath
+    if ($extraHash -ne $keeperHash) {
+        return $false
+    }
+
+    $extraText = Get-CleanupReadableText -Path $ExtraPath
+    $keeperText = Get-CleanupReadableText -Path $KeeperPath
+    if ($null -eq $extraText -and $null -eq $keeperText) {
+        return $true
+    }
+    if ($null -eq $extraText -or $null -eq $keeperText) {
+        return $false
+    }
+
+    $extraComparable = Get-CleanupComparableText -Text $extraText
+    $keeperComparable = Get-CleanupComparableText -Text $keeperText
+    return ($extraComparable -eq $keeperComparable)
+}
+
+function Add-CleanupDuplicateSection {
+    param(
+        [string]$Destination,
+        [string]$DedupeId,
+        [string]$Title,
+        [string]$Source,
+        [string]$Keeper,
+        [string]$Body
+    )
+
+    $parent = Split-Path -Parent $Destination
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $safeTitle = ($Title -replace '[\r\n]+', ' ').Trim()
+    $block = "<!-- cleanup-dupe:$DedupeId -->`r`n## $safeTitle`r`n`r`nOriginal: $Source`r`nKept: $Keeper`r`n<!-- cleanup-body:$DedupeId -->`r`n$Body`r`n<!-- /cleanup-dupe:$DedupeId -->`r`n"
+    if (Test-Path -LiteralPath $Destination) {
+        $existing = [System.IO.File]::ReadAllText($Destination).TrimEnd()
+        [System.IO.File]::WriteAllText($Destination, ($existing + "`r`n`r`n" + $block))
+    }
+    else {
+        $category = [System.IO.Path]::GetFileNameWithoutExtension($Destination)
+        $header = "# $category`r`n`r`nDuplicate documents pasted here after the text matched the kept copy. Each section keeps the original title.`r`n`r`n"
+        [System.IO.File]::WriteAllText($Destination, ($header + $block))
+    }
+
+    $written = [System.IO.File]::ReadAllText($Destination)
+    if ($written.IndexOf("<!-- cleanup-dupe:$DedupeId -->") -lt 0) {
+        throw "The category document did not keep the pasted duplicate."
+    }
+}
+
+function Remove-CleanupDuplicateSection {
+    param(
+        [string]$Destination,
+        [string]$DedupeId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Destination) -or -not (Test-Path -LiteralPath $Destination)) {
+        return
+    }
+
+    $text = [System.IO.File]::ReadAllText($Destination)
+    $startToken = "<!-- cleanup-dupe:$DedupeId -->"
+    $endToken = "<!-- /cleanup-dupe:$DedupeId -->"
+    $start = $text.IndexOf($startToken)
+    $end = $text.IndexOf($endToken)
+    if ($start -lt 0 -or $end -lt 0 -or $end -lt $start) {
+        return
+    }
+
+    $removeEnd = $end + $endToken.Length
+    $updated = $text.Remove($start, $removeEnd - $start)
+    $updated = [regex]::Replace($updated, '(\r?\n){3,}', "`r`n`r`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($updated) -or $updated.IndexOf('<!-- cleanup-dupe:') -lt 0) {
+        Remove-Item -LiteralPath $Destination -Force
+        return
+    }
+
+    [System.IO.File]::WriteAllText($Destination, ($updated + "`r`n"))
+}
+
+function Get-CleanupDuplicateBody {
+    param(
+        [string]$Destination,
+        [string]$DedupeId
+    )
+
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        return $null
+    }
+
+    $text = [System.IO.File]::ReadAllText($Destination)
+    $startToken = "<!-- cleanup-body:$DedupeId -->"
+    $endToken = "<!-- /cleanup-dupe:$DedupeId -->"
+    $start = $text.IndexOf($startToken)
+    $end = $text.IndexOf($endToken)
+    if ($start -lt 0 -or $end -lt 0 -or $end -lt $start) {
+        return $null
+    }
+
+    $bodyStart = $start + $startToken.Length
+    $body = $text.Substring($bodyStart, $end - $bodyStart)
+    if ($body.StartsWith("`r`n")) {
+        $body = $body.Substring(2)
+    }
+    elseif ($body.StartsWith("`n")) {
+        $body = $body.Substring(1)
+    }
+    if ($body.EndsWith("`r`n")) {
+        $body = $body.Substring(0, $body.Length - 2)
+    }
+    elseif ($body.EndsWith("`n")) {
+        $body = $body.Substring(0, $body.Length - 1)
+    }
+    return $body
+}
+
+function Resolve-CleanupKeeperPath {
+    param(
+        [string]$Keeper,
+        [object[]]$Moves
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Keeper) -and (Test-Path -LiteralPath $Keeper)) {
+        return $Keeper
+    }
+
+    foreach ($move in @($Moves)) {
+        $source = Get-CleanupMoveProperty -Move $move -Name 'Source'
+        if ($source -ne $Keeper) {
+            continue
+        }
+        $destination = Get-CleanupMoveProperty -Move $move -Name 'Destination'
+        if (-not [string]::IsNullOrWhiteSpace($destination) -and (Test-Path -LiteralPath $destination)) {
+            return $destination
+        }
+    }
+
+    return $null
+}
+
+function Invoke-CleanupDuplicateConsolidation {
+    param(
+        $Move,
+        [object[]]$Moves
+    )
+
+    $source = [string]$Move.Source
+    $keeper = [string]$Move.Keeper
+    $liveKeeper = Resolve-CleanupKeeperPath -Keeper $keeper -Moves $Moves
+    $destination = [string]$Move.Destination
+    $dedupeId = [string]$Move.DedupeId
+    $title = [string]$Move.Title
+    if ([string]::IsNullOrWhiteSpace($title)) {
+        $title = [System.IO.Path]::GetFileName($source)
+    }
+    if ([string]::IsNullOrWhiteSpace($liveKeeper)) {
+        throw "The kept copy is missing, so the extra file was left in place."
+    }
+
+    if (-not (Test-CleanupDuplicateContext -ExtraPath $source -KeeperPath $liveKeeper)) {
+        throw "Duplicate context did not match the kept copy, so the extra file was left in place."
+    }
+
+    $body = Get-CleanupReadableText -Path $source
+    if ($null -eq $body) {
+        throw "The document text could not be read, so the extra file was left in place."
+    }
+
+    Add-CleanupDuplicateSection -Destination $destination -DedupeId $dedupeId -Title $title -Source $source -Keeper $keeper -Body $body
+    Remove-Item -LiteralPath $source -Force -ErrorAction Stop
+}
+
+function Invoke-CleanupDuplicateRemoval {
+    param(
+        $Move,
+        [object[]]$Moves
+    )
+
+    $source = [string]$Move.Source
+    $keeper = Resolve-CleanupKeeperPath -Keeper ([string]$Move.Keeper) -Moves $Moves
+    if ([string]::IsNullOrWhiteSpace($keeper)) {
+        throw "The kept copy is missing, so the extra file was left in place."
+    }
+    if (-not (Test-CleanupDuplicateContext -ExtraPath $source -KeeperPath $keeper)) {
+        throw "Duplicate context did not match the kept copy, so the extra file was left in place."
+    }
+
+    Remove-Item -LiteralPath $source -Force -ErrorAction Stop
 }
 
 function Move-LaptopCleanupFile {
@@ -996,18 +1291,32 @@ function Invoke-LaptopFileMoves {
             continue
         }
 
-        if (Test-Path -LiteralPath $move.Destination) {
-            $move.Destination = Get-UniqueCleanupDestination -Path $move.Destination -Reserved @{}
+        $action = Get-CleanupMoveProperty -Move $move -Name 'Action'
+        if ([string]::IsNullOrWhiteSpace($action)) {
+            $action = 'move'
         }
 
         Write-Host ("{0}: {1}" -f $move.Reason, $move.Source)
         try {
-            Move-LaptopCleanupFile -Source $move.Source -Destination $move.Destination
-            $move.Status = 'moved'
+            if ($action -eq 'consolidate') {
+                Invoke-CleanupDuplicateConsolidation -Move $move -Moves $moveObjects.ToArray()
+                $move.Status = 'consolidated'
+            }
+            elseif ($action -eq 'remove-duplicate') {
+                Invoke-CleanupDuplicateRemoval -Move $move -Moves $moveObjects.ToArray()
+                $move.Status = 'removed'
+            }
+            else {
+                if (Test-Path -LiteralPath $move.Destination) {
+                    $move.Destination = Get-UniqueCleanupDestination -Path $move.Destination -Reserved @{}
+                }
+                Move-LaptopCleanupFile -Source $move.Source -Destination $move.Destination
+                $move.Status = 'moved'
+            }
         }
         catch {
             $move.Status = 'failed'
-            Write-Host "Could not move $($move.Source). $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "Could not finish $($move.Source). $($_.Exception.Message)" -ForegroundColor Yellow
         }
 
         # Rewrite after each file so an interrupted cleanup can still be undone.
@@ -1032,17 +1341,65 @@ function Restore-LaptopFileMoves {
     $moves = @($manifest.moves)
     $restored = 0
     foreach ($move in $moves) {
-        if ($move.status -ne 'moved' -and $move.Status -ne 'moved') {
+        $status = Get-CleanupMoveProperty -Move $move -Name 'Status'
+        $source = Get-CleanupMoveProperty -Move $move -Name 'Source'
+        $destination = Get-CleanupMoveProperty -Move $move -Name 'Destination'
+        $keeper = Get-CleanupMoveProperty -Move $move -Name 'Keeper'
+        $dedupeId = Get-CleanupMoveProperty -Move $move -Name 'DedupeId'
+
+        if ($status -eq 'consolidated') {
+            if ((Test-Path -LiteralPath $source)) {
+                Write-Host "Original path is occupied, left the pasted copy in place: $source" -ForegroundColor Yellow
+                continue
+            }
+            $body = Get-CleanupDuplicateBody -Destination $destination -DedupeId $dedupeId
+            if ($null -eq $body) {
+                Write-Host "Pasted duplicate was not found, left unrestored: $source" -ForegroundColor Yellow
+                continue
+            }
+            try {
+                $parent = Split-Path -Parent $source
+                if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
+                [System.IO.File]::WriteAllText($source, $body)
+                Remove-CleanupDuplicateSection -Destination $destination -DedupeId $dedupeId
+                $restored++
+                Write-Host "Restored $source"
+            }
+            catch {
+                Write-Host "Could not restore $source. $($_.Exception.Message)" -ForegroundColor Yellow
+            }
             continue
         }
 
-        $source = [string]$move.source
-        if ([string]::IsNullOrWhiteSpace($source)) {
-            $source = [string]$move.Source
+        if ($status -eq 'removed') {
+            if ((Test-Path -LiteralPath $source)) {
+                Write-Host "Original path is occupied, left the kept copy in place: $source" -ForegroundColor Yellow
+                continue
+            }
+            $keeperPath = Resolve-CleanupKeeperPath -Keeper $keeper -Moves $moves
+            if ([string]::IsNullOrWhiteSpace($keeperPath)) {
+                Write-Host "Kept copy is missing, left unrestored: $source" -ForegroundColor Yellow
+                continue
+            }
+            try {
+                $parent = Split-Path -Parent $source
+                if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $keeperPath -Destination $source -ErrorAction Stop
+                $restored++
+                Write-Host "Restored $source"
+            }
+            catch {
+                Write-Host "Could not restore $source. $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+            continue
         }
-        $destination = [string]$move.destination
-        if ([string]::IsNullOrWhiteSpace($destination)) {
-            $destination = [string]$move.Destination
+
+        if ($status -ne 'moved') {
+            continue
         }
 
         if (-not (Test-Path -LiteralPath $destination)) {
@@ -1122,7 +1479,7 @@ function Write-LaptopCleanupIndexes {
 
     $created = New-Object System.Collections.Generic.List[string]
     $moved = @($Moves | Where-Object {
-        $_ -and ((Get-CleanupMoveProperty -Move $_ -Name 'Status') -eq 'moved')
+        $_ -and (@('moved', 'consolidated', 'removed') -contains (Get-CleanupMoveProperty -Move $_ -Name 'Status'))
     })
     if ($moved.Count -eq 0) {
         return @()
@@ -1172,7 +1529,7 @@ function Write-LaptopCleanupIndexes {
         $lines = New-Object System.Collections.Generic.List[string]
         $lines.Add('# Archive review')
         $lines.Add('')
-        $lines.Add('These copies were moved out of the working folders. Duplicate extras were archived and one copy was kept. Nothing in this folder was deleted.')
+        $lines.Add('Duplicate documents are pasted into a category file under their original titles. The extra file is removed after the text matches the kept copy.')
         $lines.Add('')
         $labels = [ordered]@{
             duplicate = 'Duplicates'
@@ -1190,7 +1547,13 @@ function Write-LaptopCleanupIndexes {
             $lines.Add('')
             foreach ($move in $group) {
                 $destination = Get-CleanupMoveProperty -Move $move -Name 'Destination'
-                $lines.Add("- $destination")
+                $title = Get-CleanupMoveProperty -Move $move -Name 'Title'
+                if (-not [string]::IsNullOrWhiteSpace($title)) {
+                    $lines.Add("- $title -> $destination")
+                }
+                else {
+                    $lines.Add("- $destination")
+                }
             }
             $lines.Add('')
         }
@@ -1602,6 +1965,9 @@ function Get-LaptopCleanupSummary {
     if ($remoteBits.Count -gt 0) {
         $lines.Add(("- Move {0} to {1}" -f ($remoteBits -join ', '), $StorageHome))
     }
+    if ($groups.ContainsKey('duplicate') -and $groups['duplicate'] -gt 0) {
+        $lines.Add(("- Paste duplicate documents into {0}\Duplicates, one file per category, with each original title kept as a heading. Remove the extra file only after its contents match the kept copy." -f $StorageHome))
+    }
 
     $appNames = New-Object System.Collections.Generic.List[string]
     foreach ($app in @($Apps)) {
@@ -1629,7 +1995,7 @@ function Get-LaptopCleanupSummary {
         }
     }
 
-    $lines.Add('Files are moved, not deleted. Put them back later with -UndoLaptopCleanup.')
+    $lines.Add('The kept copy is not deleted. Put files back later with -UndoLaptopCleanup.')
     return ($lines -join [Environment]::NewLine)
 }
 
@@ -2226,7 +2592,7 @@ function Invoke-LaptopCleanup {
         }
         $manifest | Add-Member -NotePropertyName indexes -NotePropertyValue $indexEntries -Force
         Write-LaptopCleanupJson -Object $manifest -Path $manifestPath
-        $movedCount = @($manifest.moves | Where-Object { $_.Status -eq 'moved' }).Count
+        $movedCount = @($manifest.moves | Where-Object { $_.Status -in @('moved', 'consolidated', 'removed') }).Count
         if ($movedCount -gt 0) {
             $latestPath = Join-Path $logRoot 'latest.txt'
             [System.IO.File]::WriteAllText($latestPath, $manifestPath)

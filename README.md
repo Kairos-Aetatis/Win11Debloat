@@ -107,7 +107,7 @@ Below is an overview of the key features and functionality offered by Win11Deblo
 #### Storage
 
 - Organize loose documents from the Desktop, Downloads, and Documents folders into `Documents\Organized`. A subject folder such as `Legal` or `Financial` is used when the file name or opening text names one. Other documents are sorted by file type.
-- Move duplicate copies, files that have not been opened for a year, videos, images, and files larger than 100 MB to another drive, a network folder, or OneDrive. The plain file name is kept when the other copy is named `Copy of` or `file (1)`. Each file is copied, checked with SHA-256, and only then removed from the original folder. `INDEX.md` and `REVIEW.md` list what moved.
+- Keep the first copy of a duplicate. Later copies of a document are pasted into `Duplicates\<Category>.md`, with the original title as a heading, and the extra file is removed only after the text matches. Other extra copies are removed only after the file bytes match. Files that have not been opened for a year, videos, images, and files larger than 100 MB move to another drive, a network folder, or OneDrive. `INDEX.md` and `REVIEW.md` list what changed.
 - Remove known preinstalled apps that have never been opened, including third-party apps that came with the PC rather than apps you installed yourself.
 - Put moved files back with `-UndoLaptopCleanup`.
 
