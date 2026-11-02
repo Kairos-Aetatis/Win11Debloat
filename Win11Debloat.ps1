@@ -100,7 +100,16 @@ param (
     [switch]$ShowDriveLettersFirst,
     [switch]$ShowDriveLettersLast,
     [switch]$ShowNetworkDriveLettersFirst,
-    [switch]$HideDriveLetters
+    [switch]$HideDriveLetters,
+    [switch]$LaptopCleanup,
+    [switch]$ApplyLaptopCleanup,
+    [switch]$UndoLaptopCleanup,
+    [string]$StorageHome,
+    [string]$CleanupRoot,
+    [ValidateRange(30, 3650)]
+    [int]$StaleDays = 365,
+    [ValidateRange(10, 102400)]
+    [int]$LargeFileMB = 100
 )
 
 # Check if script is running as administrator
@@ -167,7 +176,7 @@ $script:ImportExportConfigSchema = Join-Path $schemasPath 'ImportExportConfigWin
 $script:RestoreBackupWindowSchema = Join-Path $schemasPath 'RestoreBackupWindow.xaml'
 $script:LoadAppsDetailsScriptPath = Join-Path (Join-Path $scriptsPath 'FileIO') 'LoadAppsDetailsFromJson.ps1'
 
-$script:ControlParams = 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'LogPath', 'Silent', 'Sysprep', 'User', 'NoRestartExplorer', 'RunDefaults', 'RunDefaultsLite', 'RunSavedSettings', 'Config', 'RunAppsListGenerator', 'CLI', 'AppRemovalTarget'
+$script:ControlParams = 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'LogPath', 'Silent', 'Sysprep', 'User', 'NoRestartExplorer', 'RunDefaults', 'RunDefaultsLite', 'RunSavedSettings', 'Config', 'RunAppsListGenerator', 'CLI', 'AppRemovalTarget', 'StorageHome', 'CleanupRoot', 'StaleDays', 'LargeFileMB', 'ApplyLaptopCleanup'
 
 # Script-level variables for GUI elements
 $script:GuiWindow = $null
@@ -318,6 +327,9 @@ if (-not $script:WingetInstalled -and -not $Silent) {
 . "$PSScriptRoot/Scripts/FileIO/LoadAppsDetailsFromJson.ps1"
 . "$PSScriptRoot/Scripts/FileIO/LoadAppPresetsFromJson.ps1"
 
+# Storage cleanup. Moves files aside and records a manifest; it does not delete them.
+. "$PSScriptRoot/Scripts/Storage/LaptopCleanup.ps1"
+
 # GUI functions
 . "$PSScriptRoot/Scripts/GUI/GetSystemUsesDarkMode.ps1"
 . "$PSScriptRoot/Scripts/GUI/SetWindowThemeResources.ps1"
@@ -377,6 +389,17 @@ $script:Params = $PSBoundParameters
 # Add default Apps parameter when RemoveApps is requested and Apps was not explicitly provided
 if ((-not $script:Params.ContainsKey("Apps")) -and $script:Params.ContainsKey("RemoveApps")) {
     $script:Params.Add('Apps', 'Default')
+}
+
+# -ApplyLaptopCleanup means the cleanup itself was requested.
+if ((-not $script:Params.ContainsKey('LaptopCleanup')) -and $script:Params.ContainsKey('ApplyLaptopCleanup')) {
+    $script:Params.Add('LaptopCleanup', $true)
+}
+
+# Undo puts files back. Don't archive them again in the same run.
+if ($script:Params.ContainsKey('UndoLaptopCleanup') -and $script:Params.ContainsKey('LaptopCleanup')) {
+    Write-Host "Undo was requested, so laptop cleanup will not run in the same pass." -ForegroundColor Yellow
+    $script:Params.Remove('LaptopCleanup')
 }
 
 $controlParamsCount = 0
@@ -513,6 +536,11 @@ if ((-not $script:Params.Count) -or $RunDefaults -or $RunDefaultsLite -or $RunSa
         # Load last used options from the "LastUsedSettings.json" file
         '3' {
             ShowCLILastUsedSettings
+        }
+
+        # Organize documents, archive media and duplicates, remove unused preinstalled apps
+        '4' {
+            AddParameter 'LaptopCleanup'
         }
     }
 }

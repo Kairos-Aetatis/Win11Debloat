@@ -10,6 +10,10 @@
       "Icon": "&#xe770;"
     },
     {
+      "Name": "Storage",
+      "Icon": "&#xEDA2;"
+    },
+    {
       "Name": "Start Menu & Search",
       "Icon": "&#xe8fc;"
     },
@@ -664,6 +668,30 @@
       "RegistryKey": "Enable_Dark_Mode.reg",
       "ApplyText": "Enabling dark mode for system and apps...",
       "RegistryUndoKey": "Enable_Light_Mode.reg",
+      "MinVersion": null,
+      "MaxVersion": null
+    },
+    {
+      "FeatureId": "LaptopCleanup",
+      "Label": "Clean up documents, media, duplicates, and unused preinstalled apps",
+      "ToolTip": "Sorts loose documents into Documents\\Organized, including a Documents folder that sits on the Desktop. Legal, financial, research, personal, and work documents get their own folders when the name or opening text says so. Other documents are sorted by file type. The first copy of a duplicate is kept. Later document copies are pasted into Duplicates\\Category.md under their original titles, and the extra file is removed only after the text matches. Other extra copies are removed only after the file bytes match. Files that have not been opened for a year, videos, images, and files over 100 MB move to another drive, a network folder, or OneDrive. INDEX.md and REVIEW.md list what changed. Folders named .gemini, AppData, and folders marked .do_not_organize are left in place. Also removes known preinstalled apps that Windows has no record of you opening, including third-party apps that shipped with the PC. Pass -CleanupRoot to choose the documents folder, -StorageHome to choose the archive folder, -StaleDays to change how old a file must be, and -LargeFileMB to change the large-file size. This is not part of the default preset.",
+      "Category": "Storage",
+      "Priority": 1,
+      "RegistryKey": null,
+      "ApplyText": "Cleaning up documents, media, duplicates, stale files, and unused preinstalled apps...",
+      "RegistryUndoKey": null,
+      "MinVersion": null,
+      "MaxVersion": null
+    },
+    {
+      "FeatureId": "UndoLaptopCleanup",
+      "Label": "Put files back from the last laptop cleanup",
+      "ToolTip": "Moves files back to their original folders using the manifest from the last laptop cleanup. Apps that were uninstalled are not reinstalled.",
+      "Category": "Storage",
+      "Priority": 2,
+      "RegistryKey": null,
+      "ApplyText": "Putting files back from the last laptop cleanup...",
+      "RegistryUndoKey": null,
       "MinVersion": null,
       "MaxVersion": null
     },
